@@ -807,7 +807,9 @@ class navtex_implementation {
 	std::vector<int>                 m_zero_crossings ;
 	long                             m_zero_crossing_count;
 	double				 m_message_time ;
-	double				 m_signal_accumulator ;
+	double				 m_early_accumulator ;
+	double				 m_prompt_accumulator ;
+	double				 m_late_accumulator ;
 	double				 m_mark_f, m_space_f;
 	double				 m_audio_average ;
 	double				 m_audio_average_tc;
@@ -823,10 +825,15 @@ class navtex_implementation {
 	BiQuadraticFilter	  m_biquad_mark;
 	BiQuadraticFilter	  m_biquad_space;
 	BiQuadraticFilter	  m_biquad_lowpass;
-	int					m_bit_sample_count, m_half_bit_sample_count;
+	int					m_bit_sample_count, m_half_bit_sample_count, m_quarter_bit_sample_count;
 	State				  m_state;
 	int					m_sample_count;
-	int					m_next_event_count ;
+	int					m_next_early_event;
+	int					m_next_prompt_event;
+	int					m_next_late_event;
+	double					m_average_early_signal;
+	double					m_average_prompt_signal;
+	double					m_average_late_signal;
 	int					m_bit_count;
 	int					m_code_bits;
 	bool				   m_shift ;
@@ -852,12 +859,13 @@ public:
 		m_time_sec = 0.0 ;
 		m_state = NOSIGNAL;
 		m_message_time = 0.0 ;
-		m_signal_accumulator = 0;
+		m_early_accumulator = 0;
+		m_prompt_accumulator = 0;
+		m_late_accumulator = 0;
 		m_audio_average = 0;
 		m_audio_minimum = 256;
 		m_sample_rate = the_sample_rate;
 		m_bit_duration = 0;
-		m_next_event_count = 0;
 		m_shift = false;
 		m_alpha_phase = false;
 		m_header_found = false;
@@ -868,15 +876,19 @@ public:
 		double m_bit_duration_seconds = 1.0 / m_baud_rate;
 		m_bit_sample_count = (int) (m_sample_rate * m_bit_duration_seconds + 0.5);
 		m_half_bit_sample_count = m_bit_sample_count / 2;
-		m_pulse_edge_event = false;
+		m_quarter_bit_sample_count = m_bit_sample_count / 4;
+		// A narrower spread between signals allows the modem to
+		// center on the pulses better, but a wider spread makes
+		// more robust under noisy conditions. 1/6 seems to work.
+		m_next_early_event = 0;
+		m_next_prompt_event = m_bit_sample_count / 6;
+		m_next_late_event = m_bit_sample_count * 2 / 6;
+		m_average_early_signal = 0;
+		m_average_prompt_signal = 0;
+		m_average_late_signal = 0;
 		m_error_count = 0;
 		m_valid_count = 0;
 		m_sample_count = 0;
-		m_next_event_count = 0;
-		m_zero_crossing_count = 0;
-		/// Maybe m_bit_sample_count is not a multiple of m_zero_crossings_divisor.
-		m_zero_crossings.resize( ( m_bit_sample_count + m_zero_crossings_divisor - 1 ) / m_zero_crossings_divisor, 0 );
-		m_sync_delta = 0;
 		m_old_mark_state = false;
 		m_averaged_mark_state = false ;
 
@@ -1145,6 +1157,66 @@ private:
 		}
 	}
 
+	// The signal is sampled at three points: early, prompt, and late.
+	// The prompt event is where the signal is decoded, while early and
+	// late are only used to adjust the time of the sampling to match
+	// the incoming signal.
+	//
+	// The early event happens 1/4 bit period before the prompt event,
+	// and the late event 1/4 bit period later. If the incoming signal
+	// peaks early, it means the decoder is late. That is, if the early
+	// signal is "too large", decoding should to happen earlier.
+	//
+	// Attempt to center the signal so the accumulator is at its
+	// maximum deviation at the prompt event. If the bit is decoded
+	// too early or too late, the code is more sensitive to noise,
+	// and less likely to decode the signal correctly.
+	void process_multicorrelator() {
+		// Adjust the sampling period once every 2 bit periods. */
+		if (m_sample_count % m_bit_sample_count)
+			return;
+
+		if (m_average_early_signal > m_average_prompt_signal * 2) {
+			// Sampling is way late, move 1/4 bit earlier.
+			m_next_early_event -= m_quarter_bit_sample_count;
+			m_next_prompt_event -= m_quarter_bit_sample_count;
+			m_next_late_event -= m_quarter_bit_sample_count;
+			// Don't keep data that makes us do another big jump.
+			m_average_early_signal = m_average_prompt_signal;
+			m_average_late_signal = m_average_prompt_signal;
+		} else if (m_average_late_signal > m_average_prompt_signal * 2) {
+			// Sampling is way early, move 1/4 bit later.
+			m_next_early_event += m_quarter_bit_sample_count;
+			m_next_prompt_event += m_quarter_bit_sample_count;
+			m_next_late_event += m_quarter_bit_sample_count;
+			// Don't keep data that makes us do another big jump.
+			m_average_early_signal = m_average_prompt_signal;
+			m_average_late_signal = m_average_prompt_signal;
+		}
+
+		// Good, the prompt event is somewhat near the center. Compare
+		// the magnitudes of all events to better align the prompt
+		// event with the signal.
+		//
+		// If the prompt event is on the peak, not only will it be
+		// larger than the others, but early and late events will
+		// have a similar magnitude to each other.
+
+		if (m_average_early_signal > m_average_prompt_signal ||
+		    m_average_early_signal > m_average_late_signal * 3 / 2) {
+			// Sampling is a little late. Move it earlier.
+			m_next_early_event--;
+			m_next_prompt_event--;
+			m_next_late_event--;
+		} else if (m_average_late_signal > m_average_prompt_signal ||
+		           m_average_late_signal > m_average_early_signal * 3 / 2) {
+			// Sampling is a little early. Move it later.
+			m_next_early_event++;
+			m_next_prompt_event++;
+			m_next_late_event++;
+		}
+	}
+
 	/* A NAVTEX message is built on SITOR collective B-mode and consists of:
 	* a phasing signal of at least ten seconds
 	* the four characters "ZCZC" that identify the end of phasing
@@ -1165,6 +1237,8 @@ public:
 		process_afc();
 		process_timeout();
 		for( int i =0; i < nb_samples; ++i ) {
+			process_multicorrelator();
+
 			short v = static_cast<short>(32767 * data[i]);
 
 			m_time_sec = m_sample_count / m_sample_rate ;
@@ -1189,73 +1263,44 @@ public:
 			// now low-pass the resulting difference
 			double logic_level = m_biquad_lowpass.filter(diffabs);
 
+			// the accumulator hits max when mark_state flips sign
 			bool mark_state = (logic_level > 0);
-			m_signal_accumulator += (mark_state) ? 1 : -1;
-			m_bit_duration++;
+			m_early_accumulator += (mark_state) ? 1 : -1;
+			m_prompt_accumulator += (mark_state) ? 1 : -1;
+			m_late_accumulator += (mark_state) ? 1 : -1;
 
-			// adjust signal synchronization over time
-			// by detecting zero crossings
-			if (mark_state != m_old_mark_state) {
-				// a valid bit duration must be longer than bit duration / 2
-				if ((m_bit_duration % m_bit_sample_count) > m_half_bit_sample_count) {
-					// create a relative index for this zero crossing
-					assert( m_sample_count - m_next_event_count + m_bit_sample_count * 8 >= 0 );
-					size_t index = size_t((m_sample_count - m_next_event_count + m_bit_sample_count * 8) % m_bit_sample_count);
-
-					// TODO: This never happened so could be replaced by assert() for speed-up.
-					// Size = m_bit_sample_count / m_zero_crossings_divisor
-					if( index / m_zero_crossings_divisor >= m_zero_crossings.size() ) {
-						LOG_ERROR("index=%d m_zero_crossings_divisor=%d m_zero_crossings.size()=%d\n",
-								(int)index, m_zero_crossings_divisor, (int)m_zero_crossings.size() );
-						LOG_ERROR("m_sample_count=%d m_next_event_count=%d m_bit_sample_count=%d\n",
-						m_sample_count, m_next_event_count, m_bit_sample_count );
-						exit(EXIT_FAILURE);
-					}
-
-					m_zero_crossings.at( index / m_zero_crossings_divisor )++;
-				}
-				m_bit_duration = 0;
-			}
-			m_old_mark_state = mark_state;
-			if (m_sample_count % m_bit_sample_count == 0) {
-				m_zero_crossing_count++;
-				static const int zero_crossing_samples = 16;
-				if (m_zero_crossing_count >= zero_crossing_samples) {
-					int best = 0;
-					int index = 0;
-					// locate max zero crossing
-					for (size_t i = 0; i < m_zero_crossings.size(); i++) {
-						int q = m_zero_crossings[i];
-						m_zero_crossings[i] = 0;
-						if (q > best) {
-							best = q;
-							index = i;
-						}
-					}
-					if (best > 0) { // if there is a basis for choosing
-						// create a signed correction value
-						index *= m_zero_crossings_divisor;
-						index = ((index + m_half_bit_sample_count) % m_bit_sample_count) - m_half_bit_sample_count;
-						// limit loop gain
-						double dbl_idx = (double)index / 8.0 ;
-						// m_sync_delta is a temporary value that is
-						// used once, then reset to zero
-						m_sync_delta = dbl_idx;
-						// m_baud_error is persistent -- used by baud error label
-						m_baud_error = dbl_idx;
-					}
-					m_zero_crossing_count = 0;
-				}
+			// An average of the magnitude of the accumulator
+			// is taken at the sample point, as well as a quarter
+			// bit before and after. This allows the code to see
+			// the best time to sample the signal without relying
+			// on (noisy) null crossings.
+			if (m_sample_count >= m_next_early_event) {
+				m_average_early_signal = decayavg(
+						m_average_early_signal,
+						fabs(m_early_accumulator), 16);
+				m_next_early_event += m_bit_sample_count;
+				m_early_accumulator = 0;
 			}
 
-			// flag the center of signal pulses
-			m_pulse_edge_event = m_sample_count >= m_next_event_count;
+			if (m_sample_count >= m_next_late_event) {
+				m_average_late_signal = decayavg(
+						m_average_late_signal,
+						fabs(m_late_accumulator), 16);
+				m_next_late_event += m_bit_sample_count;
+				m_late_accumulator = 0;
+			}
+
+			// the end of a signal pulse
+			// the accumulator should be at maximum deviation
+			m_pulse_edge_event = m_sample_count >= m_next_prompt_event;
 			if (m_pulse_edge_event) {
-				m_averaged_mark_state = (m_signal_accumulator > 0) ^ m_ptr_navtex->get_reverse();
-				m_signal_accumulator = 0;
-				// set new timeout value, include zero crossing correction
-				m_next_event_count = m_sample_count + m_bit_sample_count + (int) (m_sync_delta + 0.5);
-				m_sync_delta = 0;
+				m_average_prompt_signal = decayavg(
+						m_average_prompt_signal,
+						fabs(m_prompt_accumulator), 16);
+				m_next_prompt_event += m_bit_sample_count;
+
+				m_averaged_mark_state = (m_prompt_accumulator > 0) ^ m_ptr_navtex->get_reverse();
+				m_prompt_accumulator = 0;
 			}
 
 			if (m_audio_average < m_audio_minimum) {
