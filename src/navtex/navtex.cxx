@@ -845,6 +845,7 @@ class navtex_implementation {
 	double				 m_sync_delta;
 	bool				   m_alpha_phase ;
 	bool				   m_header_found ;
+	char snrmsg[80];
 	// filter method related
 	double				 m_center_frequency_f ;
 
@@ -1074,20 +1075,24 @@ private:
 
 	void compute_metric(void)
 	{
-		static double avg_ratio = 0.0 ;
-		static const double width_f = 10.0 ;
-       		double numer_mark = wf->powerDensity(m_mark_f, width_f);
-       		double numer_space = wf->powerDensity(m_space_f, width_f);
-       		double numer_mid = wf->powerDensity(m_center_frequency_f, width_f);
-       		double denom = wf->powerDensity(m_center_frequency_f, 2 * deviation_f) + 1e-10;
+		static double sigpwr = 0.0 ;
+		static double noisepwr = 0.0;
+		double delta = m_baud_rate/8.0;
+		double np = wf->powerDensity(m_center_frequency_f, delta) * 3000 / delta;
+		double sp =
+			wf->powerDensity(m_mark_f, delta) +
+       			wf->powerDensity(m_space_f, delta) + 1e-10;
+		double snr;
 
-		double ratio = ( numer_space + numer_mark + numer_mid ) / denom ;
+		sigpwr = decayavg ( sigpwr, sp, sp > sigpwr ? 2 : 8);
+		noisepwr = decayavg ( noisepwr, np, 16 );
+		snr = 10*log10(sigpwr / noisepwr);
 
-		/// The only power in this band should come from the signal.
-       		m_metric = 100 * decayavg( avg_ratio, ratio, 20 );
-
-		// LOG_INFO("m_metric=%lf",m_metric);
+		snprintf(snrmsg, sizeof(snrmsg), "s/n %3.0f dB", snr);
+		put_Status2(snrmsg);
+		m_metric = CLAMP((3000 / delta) * (sigpwr/noisepwr), 0.0, 100.0);
 		m_ptr_navtex->display_metric(m_metric);
+
 	}
 
 	void process_afc() {
