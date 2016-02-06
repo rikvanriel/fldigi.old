@@ -824,6 +824,8 @@ class navtex_implementation {
 	bool				   m_old_mark_state;
 	BiQuadraticFilter	  m_biquad_mark;
 	BiQuadraticFilter	  m_biquad_space;
+	BiQuadraticFilter	  m_biquad_lowpass_mark;
+	BiQuadraticFilter	  m_biquad_lowpass_space;
 	BiQuadraticFilter	  m_biquad_lowpass;
 	int					m_bit_sample_count, m_half_bit_sample_count, m_quarter_bit_sample_count;
 	State				  m_state;
@@ -910,11 +912,14 @@ private:
 	}
 
 	void configure_filters() {
-		const double mark_space_filter_q = 6 * m_center_frequency_f / 1000.0;
-		m_biquad_mark.configure(BiQuadraticFilter::BANDPASS, m_mark_f, m_sample_rate, mark_space_filter_q);
-		m_biquad_space.configure(BiQuadraticFilter::BANDPASS, m_space_f, m_sample_rate, mark_space_filter_q);
+		const double mark_filter_q = 6 * m_mark_f / 1000.0;
+		const double space_filter_q = 6 * m_space_f / 1000.0;
+		m_biquad_mark.configure(BiQuadraticFilter::BANDPASS, m_mark_f, m_sample_rate, mark_filter_q);
+		m_biquad_space.configure(BiQuadraticFilter::BANDPASS, m_space_f, m_sample_rate, space_filter_q);
 		static const double lowpass_filter_f = 140.0;
 		static const double invsqr2 = 1.0 / sqrt(2);
+		m_biquad_lowpass_mark.configure(BiQuadraticFilter::LOWPASS, lowpass_filter_f, m_sample_rate, invsqr2);
+		m_biquad_lowpass_space.configure(BiQuadraticFilter::LOWPASS, lowpass_filter_f, m_sample_rate, invsqr2);
 		m_biquad_lowpass.configure(BiQuadraticFilter::LOWPASS, lowpass_filter_f, m_sample_rate, invsqr2);
 	}
 
@@ -1255,13 +1260,11 @@ public:
 
 			m_audio_average = std::max(.1, m_audio_average);
 
-			// produce difference of absolutes of mark and space
-			double diffabs = (mark_abs - space_abs);
-
-			diffabs /= m_audio_average;
+			double mark_lp = m_biquad_lowpass_mark.filter(mark_abs / m_audio_average);
+			double space_lp = m_biquad_lowpass_space.filter(space_abs / m_audio_average);
 
 			// now low-pass the resulting difference
-			double logic_level = m_biquad_lowpass.filter(diffabs);
+			double logic_level = m_biquad_lowpass.filter(mark_lp - space_lp);
 
 			// the accumulator hits max when mark_state flips sign
 			bool mark_state = (logic_level > 0);
