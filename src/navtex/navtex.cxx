@@ -1127,8 +1127,8 @@ private:
 			} else {
 				lingering_state = m_state ;
 				/// Maybe this is the phasing signal, so we recenter.
-				double pwr_left = wf->powerDensity ( max_carrier - deviation_f, 10 );
-				double pwr_right = wf->powerDensity( max_carrier + deviation_f, 10 );
+				double pwr_left = wf->powerDensity ( max_carrier - deviation_f, 30 );
+				double pwr_right = wf->powerDensity( max_carrier + deviation_f, 30 );
 				static const double ratio_left_right = 5.0 ;
 				if( pwr_left > ratio_left_right * pwr_right ) {
 					max_carrier -= deviation_f ;
