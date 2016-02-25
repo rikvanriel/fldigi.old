@@ -166,6 +166,9 @@ private:
 
 	double			*tx_shape;
 	int 			preamble;
+	C_FIR_filter	*xmtfilt;
+
+	void			transmit(double *buf, int len);
 	void			tx_carriers();
 	void 			tx_symbol(int sym);
 	void			tx_bit(int bit);

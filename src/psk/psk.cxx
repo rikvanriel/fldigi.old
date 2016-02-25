@@ -51,6 +51,8 @@
 #include "Viewer.h"
 #include "macros.h"
 
+#include "confdialog.h"
+
 extern waterfall *wf;
 
 // Change the following for DCD low pass filter adjustment
@@ -153,6 +155,12 @@ void psk::tx_init(SoundBase *sc)
 	vphase = 0;
 	maxamp = 0;
 
+	double bw2 = 6.0 * bandwidth;
+	double flo = (get_txfreq_woffset() - bw2);
+	if (flo <= 0) flo = 0;
+	double fhi = (get_txfreq_woffset() + bw2);
+	if (fhi >= 0.48*samplerate) fhi = 0.48*samplerate;
+	xmtfilt->init_bandpass (127, 1, flo/samplerate, fhi/samplerate);
 }
 
 void psk::rx_init()
@@ -179,7 +187,6 @@ void psk::rx_init()
 	else sigsearch = 0;
 	put_MODEstatus(mode);
 	resetSN_IMD();
-	imdValid = false;
 	afcmetric = 0.0;
 	// interleaver, split incoming bit stream into two, one late by one bit
 	rxbitstate = 0;
@@ -233,6 +240,8 @@ psk::~psk()
 	if (Txinlv) delete Txinlv;
 
 	if (vestigial_sfft) delete vestigial_sfft;
+
+	if (xmtfilt) delete xmtfilt;
 }
 
 psk::psk(trx_mode pskmode) : modem()
@@ -827,6 +836,9 @@ psk::psk(trx_mode pskmode) : modem()
 		vestigial_sfft = new sfft(sfft_size, bin - 5, bin + 6); // 11 bins
 		for (int i = 0; i < 11; i++) sfft_bins[i] = cmplx(0,0);
 	}
+
+	xmtfilt = new C_FIR_filter();
+
 }
 
 //=============================================================================
@@ -1278,8 +1290,7 @@ void psk::rx_symbol(cmplx symbol, int car)
 	dcdshreg = ( dcdshreg << (symbits+1) ) | bits;
 
 	int set_dcdON = -1; // 1 sets DCD on ; 0 sets DCD off ; -1 does neither (no-op)
-	imdValid = false;
-	//printf("\n%.8X", dcdshreg);
+
 	switch (dcdshreg) {
 
 			// bpsk DCD on
@@ -1364,7 +1375,6 @@ void psk::rx_symbol(cmplx symbol, int car)
 		dcd = true;
 		acquire = 0;
 		quality = cmplx (1.0, 0.0);
-		imdValid = true;
 		if (progdefaults.Pskmails2nreport && (mailserver || mailclient))
 			s2n_sum = s2n_sum2 = s2n_ncount = 0.0;
 		//printf("\n DCD ON!!");
@@ -1450,17 +1460,15 @@ void psk::rx_symbol(cmplx symbol, int car)
 
 void psk::signalquality()
 {
-
-	if (m_Energy[1])
+	if (m_Energy[1] && m_Energy[0])
 		snratio = snfilt->run(m_Energy[0]/m_Energy[1]);
 	else
-		snratio = snfilt->run(1.0);
+		snratio = snfilt->run(100);
 
-	if (m_Energy[0] && imdValid)
-		imdratio = imdfilt->run(m_Energy[2]/m_Energy[0]);
+	if (m_Energy[2] && m_Energy[0])
+		imdratio = imdfilt->run(m_Energy[0]/m_Energy[2]);
 	else
-		imdratio = imdfilt->run(0.001);
-
+		imdratio = snratio;
 }
 
 void psk::update_syncscope()
@@ -1474,15 +1482,13 @@ void psk::update_syncscope()
 	memset(msg2, 0, sizeof(msg2));
 
 	s2n = 10.0*log10( snratio );
-	snprintf(msg1, sizeof(msg1)-1, "s/n %2d dB", (int)(floor(s2n)));
+	snprintf(msg1, sizeof(msg1), "s/n %2.0f dB", s2n);
 
-	imd = 10.0*log10( imdratio );
-	snprintf(msg2, sizeof(msg2)-1, "imd %3d dB", (int)(floor(imd)));
+	imd = -10.0*log10( imdratio );
+	snprintf(msg2, sizeof(msg2), "imd %2.0f dB", imd);
 
-	if (imdValid) {
-		put_Status1(msg1, progdefaults.StatusTimeout, progdefaults.StatusDim ? STATUS_DIM : STATUS_CLEAR);
-		put_Status2(msg2, progdefaults.StatusTimeout, progdefaults.StatusDim ? STATUS_DIM : STATUS_CLEAR);
-	}
+	put_Status1(msg1, progdefaults.StatusTimeout, progdefaults.StatusDim ? STATUS_DIM : STATUS_CLEAR);
+	put_Status2(msg2, progdefaults.StatusTimeout, progdefaults.StatusDim ? STATUS_DIM : STATUS_CLEAR);
 }
 
 char bitstatus[100];
@@ -1675,6 +1681,14 @@ int psk::rx_process(const double *buf, int len)
 // transmit processes
 //=====================================================================
 
+void psk::transmit(double *buf, int len)
+{
+//	if (btn_imd_on->value())
+		for (int i = 0; i < len; i++) xmtfilt->Irun(buf[i], buf[i]);
+
+	ModulateXmtr(buf, len);
+}
+
 #define SVP_MASK 0xF
 #define SVP_COUNT (SVP_MASK + 1)
 
@@ -1744,8 +1758,11 @@ void psk::tx_carriers()
 			} else {
 				outbuf[i] = (ival * cos(phaseacc[car]) + qval * sin(phaseacc[car])) / numcarriers;
 			}
-			if (maxamp < fabs(outbuf[i]))
-				maxamp = fabs(outbuf[i]);
+// create an imd value
+			double maxmag = xmtimd->value();
+			if (btn_imd_on->value())
+				if (fabs(outbuf[i]) > maxmag)
+					outbuf[i] = maxmag * (outbuf[i] < 0 ? -1 : 1);
 
 			phaseacc[car] += delta[car];
 			if (phaseacc[car] > TWOPI) phaseacc[car] -= TWOPI;
@@ -1765,11 +1782,16 @@ void psk::tx_carriers()
 		}
 	}
 
+	maxamp = 0;
+	for (int i = 0; i < symbollen; i++)
+		if (maxamp < fabs(outbuf[i])) maxamp = fabs(outbuf[i]);
+	maxamp *= 1.02;
 	if (maxamp) {
-		for (int i = 0; i < symbollen; i++) outbuf[i] *= (0.9 * maxamp);
+		for (int i = 0; i < symbollen; i++)
+			outbuf[i] /= maxamp;
 	}
 
-	ModulateXmtr(outbuf, symbollen);
+	transmit(outbuf, symbollen);
 }
 
 void psk::tx_symbol(int sym)
@@ -2154,7 +2176,7 @@ void psk::initSN_IMD()
 	m_NCount = 0;
 
 	COEF[0] = 2.0 * cos(TWOPI * 9 / GOERTZEL);
-	COEF[1] = 2.0 * cos(TWOPI * 18 / GOERTZEL);
+	COEF[1] = 2.0 * cos(TWOPI * 36 / GOERTZEL);
 	COEF[2] = 2.0 * cos(TWOPI  * 27 / GOERTZEL);
 }
 
