@@ -943,6 +943,9 @@ public:
 		m_bit_values.resize(m_baud_rate);
 		m_bit_cursor = 0;
 
+		m_mark_lowpass = 0;
+		m_space_lowpass = 0;
+
 		set_filter_values();
 		configure_filters();
 	}
@@ -964,11 +967,11 @@ private:
 
 	void configure_filters() {
 		const int filtlen = 512;
-		delete m_mark_lowpass;
+		if (m_mark_lowpass) delete m_mark_lowpass;
 		m_mark_lowpass = new fftfilt(m_baud_rate/m_sample_rate, filtlen);
 		m_mark_lowpass->rtty_filter(m_baud_rate/m_sample_rate);
 
-		delete m_space_lowpass;
+		if (m_space_lowpass) delete m_space_lowpass;
 		m_space_lowpass = new fftfilt(m_baud_rate/m_sample_rate, filtlen);
 		m_space_lowpass->rtty_filter(m_baud_rate/m_sample_rate);
 	}
