@@ -1449,10 +1449,20 @@ private:
 		double slope = m_average_late_signal - m_average_early_signal;
 
 		if (m_average_prompt_signal < m_average_early_signal &&
-		    m_average_prompt_signal < m_average_late_signal)
+		    m_average_prompt_signal < m_average_late_signal) {
 			// At a signal minimum. Get out quickly.
-			slope /= 2;
-		else if (m_average_prompt_signal > m_average_late_signal &&
+			if (m_average_early_signal > m_average_late_signal) {
+				// move prompt to where early is
+				slope = m_next_early_event - m_next_prompt_event;
+				m_average_late_signal = m_average_prompt_signal;
+				m_average_prompt_signal = m_average_early_signal;
+			} else {
+				// move prompt to where late is
+				slope = m_next_late_event - m_next_prompt_event;
+				m_average_early_signal = m_average_prompt_signal;
+				m_average_prompt_signal = m_average_late_signal;
+			}
+		} else if (m_average_prompt_signal > m_average_late_signal &&
 			 m_average_prompt_signal > m_average_late_signal)
 			// Limit the adjustment, to ride out noise
 			slope /= 128;
